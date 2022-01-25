@@ -1,5 +1,142 @@
 # Changelog
 
+## 0.14.13
+
+* Be more consistent about external paths ([#619](https://github.com/evanw/esbuild/issues/619))
+
+    The rules for marking paths as external using `--external:` grew over time as more special-cases were added. This release reworks the internal representation to be more straightforward and robust. A side effect is that wildcard patterns can now match post-resolve paths in addition to pre-resolve paths. Specifically you can now do `--external:./node_modules/*` to mark all files in the `./node_modules/` directory as external.
+
+    This is the updated logic:
+
+    * Before path resolution begins, import paths are checked against everything passed via an `--external:` flag. In addition, if something looks like a package path (i.e. doesn't start with `/` or `./` or `../`), import paths are checked to see if they have that package path as a path prefix (so `--external:@foo/bar` matches the import path `@foo/bar/baz`).
+
+    * After path resolution ends, the absolute paths are checked against everything passed via `--external:` that doesn't look like a package path (i.e. that starts with `/` or `./` or `../`). But before checking, the pattern is transformed to be relative to the current working directory.
+
+* Attempt to explain why esbuild can't run ([#1819](https://github.com/evanw/esbuild/issues/1819))
+
+    People sometimes try to install esbuild on one OS and then copy the `node_modules` directory over to another OS without reinstalling. This works with JavaScript code but doesn't work with esbuild because esbuild is a native binary executable. This release attempts to offer a helpful error message when this happens. It looks like this:
+
+    ```
+    $ ./node_modules/.bin/esbuild
+    ./node_modules/esbuild/bin/esbuild:106
+              throw new Error(`
+              ^
+
+    Error:
+    You installed esbuild on another platform than the one you're currently using.
+    This won't work because esbuild is written with native code and needs to
+    install a platform-specific binary executable.
+
+    Specifically the "esbuild-linux-arm64" package is present but this platform
+    needs the "esbuild-darwin-arm64" package instead. People often get into this
+    situation by installing esbuild on Windows or macOS and copying "node_modules"
+    into a Docker image that runs Linux, or by copying "node_modules" between
+    Windows and WSL environments.
+
+    If you are installing with npm, you can try not copying the "node_modules"
+    directory when you copy the files over, and running "npm ci" or "npm install"
+    on the destination platform after the copy. Or you could consider using yarn
+    instead which has built-in support for installing a package on multiple
+    platforms simultaneously.
+
+    If you are installing with yarn, you can try listing both this platform and the
+    other platform in your ".yarnrc.yml" file using the "supportedArchitectures"
+    feature: https://yarnpkg.com/configuration/yarnrc/#supportedArchitectures
+    Keep in mind that this means multiple copies of esbuild will be present.
+
+    Another alternative is to use the "esbuild-wasm" package instead, which works
+    the same way on all platforms. But it comes with a heavy performance cost and
+    can sometimes be 10x slower than the "esbuild" package, so you may also not
+    want to do that.
+
+        at generateBinPath (./node_modules/esbuild/bin/esbuild:106:17)
+        at Object.<anonymous> (./node_modules/esbuild/bin/esbuild:161:39)
+        at Module._compile (node:internal/modules/cjs/loader:1101:14)
+        at Object.Module._extensions..js (node:internal/modules/cjs/loader:1153:10)
+        at Module.load (node:internal/modules/cjs/loader:981:32)
+        at Function.Module._load (node:internal/modules/cjs/loader:822:12)
+        at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:81:12)
+        at node:internal/main/run_main_module:17:47
+    ```
+
+## 0.14.12
+
+* Ignore invalid `@import` rules in CSS ([#1946](https://github.com/evanw/esbuild/issues/1946))
+
+    In CSS, `@import` rules must come first before any other kind of rule (except for `@charset` rules). Previously esbuild would warn about incorrectly ordered `@import` rules and then hoist them to the top of the file. This broke people who wrote invalid `@import` rules in the middle of their files and then relied on them being ignored. With this release, esbuild will now ignore invalid `@import` rules and pass them through unmodified. This more accurately follows the CSS specification. Note that this behavior differs from other tools like Parcel, which does hoist CSS `@import` rules.
+
+* Print invalid CSS differently ([#1947](https://github.com/evanw/esbuild/issues/1947))
+
+    This changes how esbuild prints nested `@import` statements that are missing a trailing `;`, which is invalid CSS. The result is still partially invalid CSS, but now printed in a better-looking way:
+
+    ```css
+    /* Original code */
+    .bad { @import url("other") }
+    .red { background: red; }
+
+    /* Old output (with --minify) */
+    .bad{@import url(other) } .red{background: red;}}
+
+    /* New output (with --minify) */
+    .bad{@import url(other);}.red{background:red}
+    ```
+
+* Warn about CSS nesting syntax ([#1945](https://github.com/evanw/esbuild/issues/1945))
+
+    There's a proposed [CSS syntax for nesting rules](https://drafts.csswg.org/css-nesting/) using the `&` selector, but it's not currently implemented in any browser. Previously esbuild silently passed the syntax through untransformed. With this release, esbuild will now warn when you use nesting syntax with a `--target=` setting that includes a browser.
+
+* Warn about `}` and `>` inside JSX elements
+
+    The `}` and `>` characters are invalid inside JSX elements according to [the JSX specification](https://facebook.github.io/jsx/) because they commonly result from typos like these that are hard to catch in code reviews:
+
+    ```jsx
+    function F() {
+      return <div>></div>;
+    }
+    function G() {
+      return <div>{1}}</div>;
+    }
+    ```
+
+    The TypeScript compiler already [treats this as an error](https://github.com/microsoft/TypeScript/issues/36341), so esbuild now treats this as an error in TypeScript files too. That looks like this:
+
+    ```
+    ✘ [ERROR] The character ">" is not valid inside a JSX element
+
+        example.tsx:2:14:
+          2 │   return <div>></div>;
+            │               ^
+            ╵               {'>'}
+
+      Did you mean to escape it as "{'>'}" instead?
+
+    ✘ [ERROR] The character "}" is not valid inside a JSX element
+
+        example.tsx:5:17:
+          5 │   return <div>{1}}</div>;
+            │                  ^
+            ╵                  {'}'}
+
+      Did you mean to escape it as "{'}'}" instead?
+    ```
+
+    Babel doesn't yet treat this as an error, so esbuild only warns about these characters in JavaScript files for now. Babel 8 [treats this as an error](https://github.com/babel/babel/issues/11042) but Babel 8 [hasn't been released yet](https://github.com/babel/babel/issues/10746). If you see this warning, I recommend fixing the invalid JSX syntax because it will become an error in the future.
+
+* Warn about basic CSS property typos
+
+    This release now generates a warning if you use a CSS property that is one character off from a known CSS property:
+
+    ```
+    ▲ [WARNING] "marign-left" is not a known CSS property
+
+        example.css:2:2:
+          2 │   marign-left: 12px;
+            │   ~~~~~~~~~~~
+            ╵   margin-left
+
+      Did you mean "margin-left" instead?
+    ```
+
 ## 0.14.11
 
 * Fix a bug with enum inlining ([#1903](https://github.com/evanw/esbuild/issues/1903))
